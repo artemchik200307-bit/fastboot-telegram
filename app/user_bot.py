@@ -25,12 +25,63 @@ def date_only(value: Any) -> str:
         return str(value)[:10]
 
 
+
+def safe_get_linked_account(telegram_user_id: int) -> dict[str, Any] | None:
+    try:
+        result = db.get_linked_account(telegram_user_id)
+        return result if isinstance(result, dict) else None
+    except Exception as error:
+        print(f"get_linked_account error: {error}")
+        return None
+
+
+def safe_get_session(
+    telegram_user_id: int,
+    bot_kind: str,
+) -> dict[str, Any] | None:
+    try:
+        result = db.get_session(telegram_user_id, bot_kind)
+        return result if isinstance(result, dict) else None
+    except Exception as error:
+        print(f"get_session error: {error}")
+        return None
+
+
+def safe_set_session(
+    telegram_user_id: int,
+    bot_kind: str,
+    state: str,
+    data: dict[str, Any] | None = None,
+) -> bool:
+    try:
+        db.set_session(
+            telegram_user_id,
+            bot_kind,
+            state,
+            data or {},
+        )
+        return True
+    except Exception as error:
+        print(f"set_session error: {error}")
+        return False
+
+
+def safe_clear_session(
+    telegram_user_id: int,
+    bot_kind: str,
+) -> None:
+    try:
+        db.clear_session(telegram_user_id, bot_kind)
+    except Exception as error:
+        print(f"clear_session error: {error}")
+
+
 async def show_start(
     api: TelegramAPI,
     chat_id: int,
     telegram_user_id: int,
 ) -> None:
-    linked = db.get_linked_account(telegram_user_id)
+    linked = safe_get_linked_account(telegram_user_id)
 
     if linked:
         await api.send_message(
@@ -40,7 +91,7 @@ async def show_start(
         )
         return
 
-    db.set_session(telegram_user_id, "user", "awaiting_fastboot_id")
+    safe_set_session(telegram_user_id, "user", "awaiting_fastboot_id")
 
     await api.send_message(
         chat_id,
@@ -227,7 +278,7 @@ async def process_text(
         return
 
     if text == "❌ Отмена":
-        db.clear_session(telegram_user_id, "user")
+        safe_clear_session(telegram_user_id, "user")
         await api.send_message(
             chat_id,
             "Действие отменено.",
@@ -235,7 +286,7 @@ async def process_text(
         )
         return
 
-    session = db.get_session(telegram_user_id, "user")
+    session = safe_get_session(telegram_user_id, "user")
 
     if session:
         state = session.get("state")
@@ -259,7 +310,7 @@ async def process_text(
                 )
                 return
 
-            db.set_session(
+            safe_set_session(
                 telegram_user_id,
                 "user",
                 "awaiting_link_code",
@@ -295,7 +346,7 @@ async def process_text(
                 )
                 return
 
-            db.clear_session(telegram_user_id, "user")
+            safe_clear_session(telegram_user_id, "user")
 
             await api.send_message(
                 chat_id,
@@ -321,7 +372,7 @@ async def process_text(
                 )
                 return
 
-            db.set_session(
+            safe_set_session(
                 telegram_user_id,
                 "user",
                 "deposit_txid",
@@ -339,7 +390,7 @@ async def process_text(
                     "p_txid": text,
                 },
             )
-            db.clear_session(telegram_user_id, "user")
+            safe_clear_session(telegram_user_id, "user")
             await api.send_message(
                 chat_id,
                 (
@@ -364,7 +415,7 @@ async def process_text(
                 )
                 return
 
-            db.set_session(
+            safe_set_session(
                 telegram_user_id,
                 "user",
                 "withdraw_address",
@@ -390,7 +441,7 @@ async def process_text(
                 await api.send_message(chat_id, html.escape(str(error)))
                 return
 
-            db.clear_session(telegram_user_id, "user")
+            safe_clear_session(telegram_user_id, "user")
             await api.send_message(
                 chat_id,
                 (
@@ -401,7 +452,7 @@ async def process_text(
             )
             return
 
-    linked = db.get_linked_account(telegram_user_id)
+    linked = safe_get_linked_account(telegram_user_id)
 
     if not linked:
         await show_start(api, chat_id, telegram_user_id)
@@ -452,7 +503,7 @@ async def process_callback(
     await api.answer_callback_query(callback_id)
 
     if data == "deposit:create":
-        db.set_session(telegram_user_id, "user", "deposit_amount")
+        safe_set_session(telegram_user_id, "user", "deposit_amount")
         await api.send_message(
             chat_id,
             f"Введите сумму пополнения от {settings.min_deposit:g} USDT.",
@@ -461,7 +512,7 @@ async def process_callback(
         return
 
     if data == "withdraw:create":
-        db.set_session(telegram_user_id, "user", "withdraw_amount")
+        safe_set_session(telegram_user_id, "user", "withdraw_amount")
         await api.send_message(
             chat_id,
             f"Введите сумму вывода от {settings.min_withdrawal:g} USDT.",
