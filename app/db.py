@@ -57,16 +57,26 @@ def clear_session(telegram_user_id: int, bot_kind: str) -> None:
     )
 
 
-def get_linked_account(telegram_user_id: int) -> dict[str, Any] | None:
+def get_linked_account(
+    telegram_user_id: int,
+) -> dict[str, Any] | None:
     result = (
         supabase.table("telegram_accounts")
-        .select("user_id,telegram_user_id,telegram_chat_id,is_active")
+        .select(
+            "user_id,"
+            "telegram_user_id,"
+            "telegram_chat_id,"
+            "is_active"
+        )
         .eq("telegram_user_id", telegram_user_id)
         .eq("is_active", True)
-        .maybe_single()
+        .limit(1)
         .execute()
     )
-    return result.data
+
+    rows = result.data or []
+
+    return rows[0] if rows else None
 
 
 def queue_rows(limit: int = 30) -> list[dict[str, Any]]:
