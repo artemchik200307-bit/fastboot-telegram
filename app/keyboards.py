@@ -31,3 +31,33 @@ def cancel_keyboard() -> dict:
         "resize_keyboard": True,
         "one_time_keyboard": True,
     }
+
+
+def notification_settings_keyboard(settings: dict) -> dict:
+    def mark(enabled: bool) -> str:
+        return "✅" if enabled else "❌"
+
+    return {
+        "inline_keyboard": [
+            [{
+                "text": f"{mark(settings.get('trade_notifications', True))} AI-сделки",
+                "callback_data": "settings:trade",
+            }],
+            [{
+                "text": f"{mark(settings.get('funding_notifications', True))} Пополнения и выводы",
+                "callback_data": "settings:funding",
+            }],
+            [{
+                "text": f"{mark(settings.get('referral_notifications', True))} Рефералы",
+                "callback_data": "settings:referral",
+            }],
+            [{
+                "text": f"{mark(settings.get('daily_report', True))} Ежедневный отчёт",
+                "callback_data": "settings:daily",
+            }],
+            [{
+                "text": "🔄 Обновить",
+                "callback_data": "settings:refresh",
+            }],
+        ]
+    }
