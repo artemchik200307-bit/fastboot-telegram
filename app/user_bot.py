@@ -1,17 +1,36 @@
 from __future__ import annotations
 
 import html
+import re
 from datetime import datetime
 from typing import Any
 
 from app import db
 from app.config import settings
-from app.keyboards import cancel_keyboard, user_menu
+from app.keyboards import cancel_keyboard, notification_settings_keyboard, user_menu
 from app.telegram_api import TelegramAPI
 
 
 def money(value: Any) -> str:
     return f"{float(value or 0):,.2f}".replace(",", " ")
+
+
+MENU_TEXTS = {
+    "💰 Баланс",
+    "🤖 AI-бот",
+    "📈 История сделок",
+    "💳 Пополнить",
+    "💸 Вывести",
+    "👥 Рефералы",
+    "⚙️ Настройки",
+}
+
+MENU_COMMANDS = {
+    "/menu", "/balance", "/ai", "/trades", "/deposit",
+    "/withdraw", "/referrals", "/settings", "/unlink",
+}
+
+CANCEL_TEXTS = {"❌ Отмена", "/cancel"}
 
 
 def date_only(value: Any) -> str:
@@ -264,6 +283,75 @@ async def show_referrals(
     await api.send_message(chat_id, text, reply_markup=user_menu())
 
 
+
+async def show_notification_settings(
+    api: TelegramAPI,
+    chat_id: int,
+    telegram_user_id: int,
+) -> None:
+    data = db.rpc(
+        "telegram_get_notification_settings",
+        {"p_telegram_user_id": telegram_user_id},
+    ) or {}
+
+    text = (
+        "<b>⚙️ Настройки уведомлений</b>\n\n"
+        "Выберите категории сообщений, которые хотите получать.\n"
+        "Изменения применяются сразу."
+    )
+
+    await api.send_message(
+        chat_id,
+        text,
+        reply_markup=notification_settings_keyboard(data),
+    )
+
+
+async def show_home(
+    api: TelegramAPI,
+    chat_id: int,
+    telegram_user_id: int,
+) -> None:
+    data = db.rpc(
+        "telegram_get_dashboard",
+        {"p_telegram_user_id": telegram_user_id},
+    ) or {}
+
+    text = (
+        "<b>FASTBOOT</b>\n\n"
+        f"Основной счёт: <b>{money(data.get('spot_balance'))} USDT</b>\n"
+        f"AI Bot: <b>{money(data.get('bot_balance'))} USDT</b>\n"
+        f"Терминал: <b>{money(data.get('trading_balance'))} USDT</b>\n"
+        f"Доступно к выводу: <b>{money(data.get('withdraw_available'))} USDT</b>\n\n"
+        "Выберите нужный раздел."
+    )
+
+    await api.send_message(
+        chat_id,
+        text,
+        reply_markup=user_menu(),
+    )
+
+
+async def unlink_telegram_account(
+    api: TelegramAPI,
+    chat_id: int,
+    telegram_user_id: int,
+) -> None:
+    result = db.rpc(
+        "telegram_unlink_account",
+        {"p_telegram_user_id": telegram_user_id},
+    ) or {}
+
+    safe_clear_session(telegram_user_id, "user")
+
+    await api.send_message(
+        chat_id,
+        html.escape(str(result.get("message") or "Telegram отключён.")),
+        reply_markup={"remove_keyboard": True},
+    )
+
+
 async def process_text(
     api: TelegramAPI,
     message: dict[str, Any],
@@ -274,10 +362,11 @@ async def process_text(
     text = str(message.get("text") or "").strip()
 
     if text in {"/start", "start"}:
+        safe_clear_session(telegram_user_id, "user")
         await show_start(api, chat_id, telegram_user_id)
         return
 
-    if text == "❌ Отмена":
+    if text in CANCEL_TEXTS:
         safe_clear_session(telegram_user_id, "user")
         await api.send_message(
             chat_id,
@@ -285,6 +374,43 @@ async def process_text(
             reply_markup=user_menu(),
         )
         return
+
+    # Главное меню всегда важнее текущего шага диалога.
+    if text in MENU_TEXTS or text in MENU_COMMANDS:
+        safe_clear_session(telegram_user_id, "user")
+        linked = safe_get_linked_account(telegram_user_id)
+
+        if not linked:
+            await show_start(api, chat_id, telegram_user_id)
+            return
+
+        if text in {"💰 Баланс", "/balance"}:
+            await show_balance(api, chat_id, telegram_user_id)
+            return
+        if text in {"🤖 AI-бот", "/ai"}:
+            await show_ai(api, chat_id, telegram_user_id)
+            return
+        if text in {"📈 История сделок", "/trades"}:
+            await show_trades(api, chat_id, telegram_user_id)
+            return
+        if text in {"💳 Пополнить", "/deposit"}:
+            await show_deposit(api, chat_id)
+            return
+        if text in {"💸 Вывести", "/withdraw"}:
+            await show_withdraw(api, chat_id, telegram_user_id)
+            return
+        if text in {"👥 Рефералы", "/referrals"}:
+            await show_referrals(api, chat_id, telegram_user_id)
+            return
+        if text in {"⚙️ Настройки", "/settings"}:
+            await show_notification_settings(api, chat_id, telegram_user_id)
+            return
+        if text == "/menu":
+            await show_home(api, chat_id, telegram_user_id)
+            return
+        if text == "/unlink":
+            await unlink_telegram_account(api, chat_id, telegram_user_id)
+            return
 
     session = safe_get_session(telegram_user_id, "user")
 
@@ -355,6 +481,12 @@ async def process_text(
                     f"FASTBOOT ID: <code>{html.escape(str(result.get('fastboot_id')))}</code>"
                 ),
                 reply_markup=user_menu(),
+            )
+
+            await show_home(
+                api,
+                chat_id,
+                telegram_user_id,
             )
             return
 
@@ -438,7 +570,32 @@ async def process_text(
                     },
                 )
             except Exception as error:
-                await api.send_message(chat_id, html.escape(str(error)))
+                safe_clear_session(telegram_user_id, "user")
+                error_text = str(error)
+
+                if "Некорректный TRC20 адрес" in error_text:
+                    message_text = (
+                        "Некорректный адрес USDT TRC20.\n\n"
+                        "Нажмите «Вывести» и создайте заявку заново."
+                    )
+                elif "Следующий вывод доступен" in error_text:
+                    match = re.search(
+                        r"Следующий вывод доступен\s+\d{2}\.\d{2}\.\d{4}",
+                        error_text,
+                    )
+                    message_text = match.group(0) if match else "Следующий вывод пока недоступен."
+                elif "Недостаточно средств" in error_text:
+                    message_text = "Недостаточно средств на основном счёте."
+                elif "активная заявка" in error_text.lower():
+                    message_text = "У вас уже есть активная заявка на вывод."
+                else:
+                    message_text = "Не удалось создать заявку на вывод."
+
+                await api.send_message(
+                    chat_id,
+                    message_text,
+                    reply_markup=user_menu(),
+                )
                 return
 
             safe_clear_session(telegram_user_id, "user")
@@ -460,21 +617,38 @@ async def process_text(
 
     handlers = {
         "💰 Баланс": show_balance,
+        "/balance": show_balance,
         "🤖 AI-бот": show_ai,
+        "/ai": show_ai,
         "📈 История сделок": show_trades,
+        "/trades": show_trades,
         "💸 Вывести": show_withdraw,
+        "/withdraw": show_withdraw,
         "👥 Рефералы": show_referrals,
+        "/referrals": show_referrals,
     }
 
-    if text == "💳 Пополнить":
+    if text in {"💳 Пополнить", "/deposit"}:
         await show_deposit(api, chat_id)
         return
 
-    if text == "⚙️ Настройки":
-        await api.send_message(
+    if text in {"⚙️ Настройки", "/settings"}:
+        await show_notification_settings(
+            api,
             chat_id,
-            "⚙️ Настройки уведомлений будут добавлены на следующем этапе.",
-            reply_markup=user_menu(),
+            telegram_user_id,
+        )
+        return
+
+    if text == "/menu":
+        await show_home(api, chat_id, telegram_user_id)
+        return
+
+    if text == "/unlink":
+        await unlink_telegram_account(
+            api,
+            chat_id,
+            telegram_user_id,
         )
         return
 
@@ -517,4 +691,48 @@ async def process_callback(
             chat_id,
             f"Введите сумму вывода от {settings.min_withdrawal:g} USDT.",
             reply_markup=cancel_keyboard(),
+        )
+
+        return
+
+    if data.startswith("settings:"):
+        action = data.split(":", 1)[1]
+
+        if action == "refresh":
+            await show_notification_settings(
+                api,
+                chat_id,
+                telegram_user_id,
+            )
+            return
+
+        field_map = {
+            "trade": "trade_notifications",
+            "funding": "funding_notifications",
+            "referral": "referral_notifications",
+            "daily": "daily_report",
+        }
+
+        field = field_map.get(action)
+        if not field:
+            return
+
+        current = db.rpc(
+            "telegram_get_notification_settings",
+            {"p_telegram_user_id": telegram_user_id},
+        ) or {}
+
+        db.rpc(
+            "telegram_update_notification_setting",
+            {
+                "p_telegram_user_id": telegram_user_id,
+                "p_setting": field,
+                "p_enabled": not bool(current.get(field, True)),
+            },
+        )
+
+        await show_notification_settings(
+            api,
+            chat_id,
+            telegram_user_id,
         )
